@@ -1,73 +1,81 @@
 // ============================================================
 //  DUNGEON CRAWLER — dungeon.js
-//  Room-by-room floor generation (Binding of Isaac style)
-//  Varied room shapes: rectangle, wide, tall, hallway, L-shape, cave
+//  Phase 1: Abstract graph generation (topology)
+//  Phase 2: Spatial layout (organic 2D positioning)
+//  Phase 3: Screen generation (tile grids per node)
+//  Phase 4: Secret layer (hidden connections)
 // ============================================================
 
 const Dungeon = (() => {
 
-  // ── Tile types ──────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════
+  //  CONSTANTS
+  // ══════════════════════════════════════════════════════════
+
   const TILE = {
-    VOID:       0,
-    FLOOR:      1,
-    WALL:       2,
-    DOOR_N:     3,
-    DOOR_S:     4,
-    DOOR_E:     5,
-    DOOR_W:     6,
-    STAIR_DOWN: 7,
-    STAIR_UP:   8,
+    VOID:         0,
+    FLOOR:        1,
+    WALL:         2,
+    FLOOR_SECRET: 3,  // secret passage floor (looks like wall until discovered)
+    STAIR_DOWN:   4,
+    STAIR_UP:     5,
   };
 
-  // ── Direction helpers ────────────────────────────────────
-  const DIR = {
-    N: 'N', S: 'S', E: 'E', W: 'W',
+  // Exit types — what the opening looks like
+  const EXIT_TYPE = {
+    OPEN:         'open',         // open archway
+    DOOR_WOOD:    'door_wood',    // simple wooden door
+    DOOR_STRONG:  'door_strong',  // reinforced wooden door
+    DOOR_METAL:   'door_metal',   // metal door
+    PORTCULLIS:   'portcullis',   // mechanism gate
+    CREVICE:      'crevice',      // secret crack in wall
+    BRICKED:      'bricked',      // sealed (special key/action)
   };
 
-  const OPPOSITE = { N: 'S', S: 'N', E: 'W', W: 'E' };
-
-  const DIR_OFFSET = {
-    N: { dx:  0, dy: -1 },
-    S: { dx:  0, dy:  1 },
-    E: { dx:  1, dy:  0 },
-    W: { dx: -1, dy:  0 },
+  // Lock symbols
+  const LOCK = {
+    NONE:  null,
+    SKULL: 'skull',
+    STAR:  'star',
   };
 
-  // ── Room type definitions ────────────────────────────────
-  const ROOM_TYPES = ['rect', 'wide', 'tall', 'hallway_h', 'hallway_v', 'l_shape', 'cave'];
+  // Room identities — what the room originally was
+  const ROOM_IDENTITY = [
+    'grand_hall', 'barracks', 'bedchamber', 'worship_room',
+    'burial_chamber', 'treasury', 'library', 'kitchen',
+    'guardroom', 'prison', 'antechamber', 'armory',
+  ];
 
-  // Room grid dimensions by type (cols x rows, interior only)
-  const ROOM_DIMS = {
-    rect:      { cols: 17, rows: 13 },
-    wide:      { cols: 25, rows: 9  },
-    tall:      { cols: 11, rows: 19 },
-    hallway_h: { cols: 23, rows: 5  },
-    hallway_v: { cols: 5,  rows: 23 },
-    l_shape:   { cols: 19, rows: 15 },
-    cave:      { cols: 19, rows: 15 },
-  };
+  // Corridor identities
+  const CORRIDOR_IDENTITY = [
+    'service_passage', 'secret_passage', 'grand_corridor',
+    'rough_tunnel', 'carved_hallway', 'natural_cave_passage',
+  ];
 
-  // Which doors each room type supports
-  const ROOM_DOORS = {
-    rect:      [DIR.N, DIR.S, DIR.E, DIR.W],
-    wide:      [DIR.N, DIR.S, DIR.E, DIR.W],
-    tall:      [DIR.N, DIR.S, DIR.E, DIR.W],
-    hallway_h: [DIR.E, DIR.W],
-    hallway_v: [DIR.N, DIR.S],
-    l_shape:   [DIR.N, DIR.S, DIR.E, DIR.W],
-    cave:      [DIR.N, DIR.S, DIR.E, DIR.W],
-  };
+  // Build quality
+  const BUILD_QUALITY = ['crude', 'rough', 'standard', 'fine', 'ornate'];
 
-  // ── Tile display config ──────────────────────────────────
+  // Node types
+  const NODE_TYPE = { ROOM: 'room', CORRIDOR: 'corridor', SECRET: 'secret' };
+
+  // Tile display
   const TILE_SIZE = 36;
 
-  // ── Floor state ──────────────────────────────────────────
-  let rooms       = {};   // id -> room object
-  let currentRoom = null;
-  let startRoomId = null;
-  let depth       = 1;
+  // ══════════════════════════════════════════════════════════
+  //  STATE
+  // ══════════════════════════════════════════════════════════
 
-  // ── RNG ──────────────────────────────────────────────────
+  let nodes       = {};   // id -> node
+  let edges       = [];   // { fromId, toId, fromExit, toExit }
+  let currentNode = null;
+  let startNodeId = null;
+  let depth       = 1;
+  let debugOpen   = false;
+
+  // ══════════════════════════════════════════════════════════
+  //  RNG UTILITIES
+  // ══════════════════════════════════════════════════════════
+
   function rnd(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
@@ -76,7 +84,23 @@ const Dungeon = (() => {
     return arr[Math.floor(Math.random() * arr.length)];
   }
 
-  // ── Grid helpers ─────────────────────────────────────────
+  function chance(pct) {
+    return Math.random() < pct;
+  }
+
+  function shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  GRID UTILITIES
+  // ══════════════════════════════════════════════════════════
+
   function makeGrid(cols, rows, fill = TILE.VOID) {
     return Array.from({ length: rows }, () => new Array(cols).fill(fill));
   }
@@ -87,317 +111,747 @@ const Dungeon = (() => {
   }
 
   function getTile(grid, x, y) {
-    if (y < 0 || y >= grid.length || x < 0 || x >= grid[0].length)
+    if (!grid || y < 0 || y >= grid.length || x < 0 || x >= grid[0].length)
       return TILE.VOID;
     return grid[y][x];
   }
 
-  // ── Room shape generators ────────────────────────────────
-
-  function buildRect(cols, rows) {
-    const grid = makeGrid(cols, rows, TILE.WALL);
-    for (let y = 1; y < rows - 1; y++)
-      for (let x = 1; x < cols - 1; x++)
-        grid[y][x] = TILE.FLOOR;
-    return grid;
+  function getCurrentTile(x, y) {
+    if (!currentNode) return TILE.VOID;
+    return getTile(currentNode.grid, x, y);
   }
 
-  function buildLShape(cols, rows) {
-    const grid = makeGrid(cols, rows, TILE.WALL);
-    const splitC = Math.floor(cols * 0.55);
-    const splitR = Math.floor(rows * 0.55);
-    // Bottom-left block
-    for (let y = 1; y < rows - 1; y++)
-      for (let x = 1; x < splitC; x++)
-        if (y >= splitR || x < splitC)
-          grid[y][x] = TILE.FLOOR;
-    // Top-right block
-    for (let y = 1; y < splitR; y++)
-      for (let x = splitC; x < cols - 1; x++)
-        grid[y][x] = TILE.FLOOR;
-    // Re-wall the outside
-    for (let y = 0; y < rows; y++)
-      for (let x = 0; x < cols; x++)
-        if (y === 0 || y === rows - 1 || x === 0 || x === cols - 1)
-          if (grid[y][x] === TILE.FLOOR) grid[y][x] = TILE.WALL;
-    return grid;
+  // ══════════════════════════════════════════════════════════
+  //  PHASE 1 — ABSTRACT GRAPH GENERATION
+  // ══════════════════════════════════════════════════════════
+
+  function makeNodeId() {
+    return `n_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function buildCave(cols, rows) {
-    // Cellular automata cave generation
-    let grid = makeGrid(cols, rows, TILE.VOID);
+  function makeNode(type, sx, sy) {
+    const id       = makeNodeId();
+    const identity = type === NODE_TYPE.ROOM
+      ? pick(ROOM_IDENTITY)
+      : type === NODE_TYPE.SECRET
+        ? 'secret_chamber'
+        : pick(CORRIDOR_IDENTITY);
 
-    // Seed randomly, keep border as wall
-    for (let y = 0; y < rows; y++)
-      for (let x = 0; x < cols; x++)
-        grid[y][x] = (y === 0 || y === rows-1 || x === 0 || x === cols-1)
-          ? TILE.WALL
-          : (Math.random() < 0.45 ? TILE.WALL : TILE.FLOOR);
+    const quality  = pick(BUILD_QUALITY);
+    const repurposed = type === NODE_TYPE.ROOM && chance(0.35);
 
-    // Cellular automata iterations
-    for (let iter = 0; iter < 4; iter++) {
-      const next = makeGrid(cols, rows, TILE.VOID);
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          if (y === 0 || y === rows-1 || x === 0 || x === cols-1) {
-            next[y][x] = TILE.WALL;
-            continue;
-          }
-          let walls = 0;
-          for (let dy = -1; dy <= 1; dy++)
-            for (let dx = -1; dx <= 1; dx++)
-              if (getTile(grid, x+dx, y+dy) === TILE.WALL) walls++;
-          next[y][x] = walls >= 5 ? TILE.WALL : TILE.FLOOR;
-        }
-      }
-      grid = next;
-    }
-
-    // Ensure a walkable center so player always spawns safely
-    const cx = Math.floor(cols / 2);
-    const cy = Math.floor(rows / 2);
-    for (let dy = -2; dy <= 2; dy++)
-      for (let dx = -2; dx <= 2; dx++)
-        setTile(grid, cx+dx, cy+dy, TILE.FLOOR);
-
-    // Carve guaranteed corridors from center to each edge midpoint
-    // so doors placed later are never blocked by cave walls
-    const midC = Math.floor(cols / 2);
-    const midR = Math.floor(rows / 2);
-    // North corridor
-    for (let y = 1; y <= midR; y++) setTile(grid, midC, y, TILE.FLOOR);
-    // South corridor
-    for (let y = midR; y < rows - 1; y++) setTile(grid, midC, y, TILE.FLOOR);
-    // West corridor
-    for (let x = 1; x <= midC; x++) setTile(grid, x, midR, TILE.FLOOR);
-    // East corridor
-    for (let x = midC; x < cols - 1; x++) setTile(grid, x, midR, TILE.FLOOR);
-
-    return grid;
-  }
-
-  function generateRoomGrid(type) {
-    const { cols, rows } = ROOM_DIMS[type];
-    switch (type) {
-      case 'rect':
-      case 'wide':
-      case 'tall':
-      case 'hallway_h':
-      case 'hallway_v': return buildRect(cols, rows);
-      case 'l_shape':   return buildLShape(cols, rows);
-      case 'cave':      return buildCave(cols, rows);
-      default:          return buildRect(cols, rows);
-    }
-  }
-
-  // ── Door placement ───────────────────────────────────────
-  // Doors are carved into the wall at the midpoint of each edge
-
-  function doorTileForDir(dir) {
-    return { N: TILE.DOOR_N, S: TILE.DOOR_S, E: TILE.DOOR_E, W: TILE.DOOR_W }[dir];
-  }
-
-  function placeDoor(grid, dir) {
-    const rows = grid.length;
-    const cols = grid[0].length;
-    const midC = Math.floor(cols / 2);
-    const midR = Math.floor(rows / 2);
-    const dt   = doorTileForDir(dir);
-    switch (dir) {
-      case DIR.N: setTile(grid, midC, 0,      dt); break;
-      case DIR.S: setTile(grid, midC, rows-1, dt); break;
-      case DIR.E: setTile(grid, cols-1, midR, dt); break;
-      case DIR.W: setTile(grid, 0,     midR,  dt); break;
-    }
-    // Also open the tile just inside the door
-    switch (dir) {
-      case DIR.N: setTile(grid, midC, 1,      TILE.FLOOR); break;
-      case DIR.S: setTile(grid, midC, rows-2, TILE.FLOOR); break;
-      case DIR.E: setTile(grid, cols-2, midR, TILE.FLOOR); break;
-      case DIR.W: setTile(grid, 1,     midR,  TILE.FLOOR); break;
-    }
-  }
-
-  // ── Player spawn position in a room ─────────────────────
-  function spawnPosForEntry(grid, fromDir) {
-    // Spawn player near the door they came from
-    const rows = grid.length;
-    const cols = grid[0].length;
-    const midC = Math.floor(cols / 2);
-    const midR = Math.floor(rows / 2);
-    switch (fromDir) {
-      case DIR.N: return { x: midC, y: 2 };
-      case DIR.S: return { x: midC, y: rows - 3 };
-      case DIR.E: return { x: cols - 3, y: midR };
-      case DIR.W: return { x: 2,        y: midR };
-      default:    return { x: midC,     y: midR };
-    }
-  }
-
-  // ── Floor generation ─────────────────────────────────────
-
-  function generate(numRooms = 12) {
-    rooms       = {};
-    currentRoom = null;
-
-    let idCounter = 0;
-    const makeId  = () => `room_${idCounter++}`;
-
-    // Place rooms on a virtual grid to track connectivity
-    // Each room has a grid position { gx, gy }
-    const placed = {};  // "gx,gy" -> roomId
-    const queue  = [];
-
-    // Start room — always a rect
-    const startId = makeId();
-    const startType = 'rect';
-    const startGrid = generateRoomGrid(startType);
-    rooms[startId] = {
-      id:        startId,
-      type:      startType,
-      grid:      startGrid,
-      gx:        0,
-      gy:        0,
-      doors:     {},   // dir -> connectedRoomId
-      isStart:   true,
-      isEnd:     false,
-      visited:   false,
-    };
-    placed['0,0'] = startId;
-    queue.push(startId);
-    startRoomId = startId;
-
-    let attempts = 0;
-    while (Object.keys(rooms).length < numRooms && attempts < numRooms * 20) {
-      attempts++;
-      if (queue.length === 0) break;
-
-      const parentId = queue[Math.floor(Math.random() * queue.length)];
-      const parent   = rooms[parentId];
-
-      // Pick a random available direction
-      const availableDirs = ROOM_DOORS[parent.type].filter(d => !parent.doors[d]);
-      if (availableDirs.length === 0) continue;
-
-      const dir    = pick(availableDirs);
-      const offset = DIR_OFFSET[dir];
-      const ngx    = parent.gx + offset.dx;
-      const ngy    = parent.gy + offset.dy;
-      const key    = `${ngx},${ngy}`;
-
-      if (placed[key]) continue;  // slot taken
-
-      // Pick a room type compatible with this direction
-      const compatTypes = ROOM_TYPES.filter(t => ROOM_DOORS[t].includes(OPPOSITE[dir]));
-      const type  = pick(compatTypes);
-      const grid  = generateRoomGrid(type);
-      const newId = makeId();
-
-      // Wire doors
-      placeDoor(parent.grid, dir);
-      placeDoor(grid, OPPOSITE[dir]);
-      parent.doors[dir] = newId;
-
-      rooms[newId] = {
-        id:      newId,
-        type,
-        grid,
-        gx:      ngx,
-        gy:      ngy,
-        doors:   { [OPPOSITE[dir]]: parentId },
-        isStart: false,
-        isEnd:   false,
-        visited: false,
-      };
-      placed[key] = newId;
-      queue.push(newId);
-    }
-
-    // Mark the last room added as the end (has stair down)
-    const roomIds  = Object.keys(rooms);
-    const endId    = roomIds[roomIds.length - 1];
-    const endRoom  = rooms[endId];
-    endRoom.isEnd  = true;
-    const eg       = endRoom.grid;
-    const midC     = Math.floor(eg[0].length / 2);
-    const midR     = Math.floor(eg.length / 2);
-    setTile(eg, midC, midR, TILE.STAIR_DOWN);
-
-    currentRoom = rooms[startRoomId];
-    currentRoom.visited = true;
+    // Room dimensions based on identity
+    const dims = getRoomDims(type, identity);
 
     return {
-      rooms,
-      startRoomId,
-      currentRoom,
-      depth,
-      TILE,
+      id,
+      type,
+      identity,
+      quality,
+      repurposed,
+      repurposedAs: repurposed ? pick(ROOM_IDENTITY.filter(r => r !== identity)) : null,
+      // Spatial position on the abstract map (grid units)
+      sx, sy,
+      // Tile grid (generated in Phase 3)
+      grid: null,
+      cols: dims.cols,
+      rows: dims.rows,
+      // Exits: array of exit objects { id, wall, offset, exitType, lock, connectedNodeId, connectedExitId, secret, discovered }
+      exits: [],
+      // Flags
+      isStart:  false,
+      isEnd:    false,
+      visited:  false,
+      // Debug info accumulated during generation
+      debugLog: [],
     };
   }
 
-  // ── Transition ───────────────────────────────────────────
-  function enterRoom(roomId, fromDir) {
-    currentRoom = rooms[roomId];
-    currentRoom.visited = true;
-    const spawnPos = fromDir
-      ? spawnPosForEntry(currentRoom.grid, fromDir)
-      : { x: Math.floor(currentRoom.grid[0].length / 2), y: Math.floor(currentRoom.grid.length / 2) };
-    return { room: currentRoom, spawnPos };
+  function getRoomDims(type, identity) {
+    if (type === NODE_TYPE.CORRIDOR) {
+      const horiz = identity === 'grand_corridor' || identity === 'carved_hallway' || identity === 'service_passage';
+      if (identity === 'grand_corridor') return chance(0.5)
+        ? { cols: 25, rows: 7 } : { cols: 7, rows: 25 };
+      if (identity === 'rough_tunnel' || identity === 'natural_cave_passage')
+        return chance(0.5) ? { cols: 19, rows: 5 } : { cols: 5, rows: 19 };
+      return chance(0.5) ? { cols: 21, rows: 5 } : { cols: 5, rows: 21 };
+    }
+    if (type === NODE_TYPE.SECRET) return { cols: 13, rows: 11 };
+
+    // Room identity drives size
+    const sizes = {
+      grand_hall:      { cols: 27, rows: 21 },
+      barracks:        { cols: 21, rows: 15 },
+      bedchamber:      { cols: 15, rows: 13 },
+      worship_room:    { cols: 19, rows: 17 },
+      burial_chamber:  { cols: 17, rows: 15 },
+      treasury:        { cols: 13, rows: 11 },
+      library:         { cols: 17, rows: 13 },
+      kitchen:         { cols: 15, rows: 13 },
+      guardroom:       { cols: 13, rows: 11 },
+      prison:          { cols: 19, rows: 15 },
+      antechamber:     { cols: 13, rows: 11 },
+      armory:          { cols: 17, rows: 13 },
+    };
+    return sizes[identity] || { cols: 15, rows: 13 };
   }
 
-  // ── Tile query ───────────────────────────────────────────
-  function getCurrentTile(x, y) {
-    if (!currentRoom) return TILE.VOID;
-    return getTile(currentRoom.grid, x, y);
+  // ── Generate the abstract graph ──────────────────────────
+  function generateGraph(targetRooms = 14) {
+    nodes = {};
+    edges = [];
+
+    // Place start node
+    const startNode  = makeNode(NODE_TYPE.ROOM, 0, 0);
+    startNode.isStart = true;
+    startNode.debugLog.push('Start room — always a room node.');
+    nodes[startNode.id] = startNode;
+    startNodeId = startNode.id;
+
+    // BFS-style expansion
+    const frontier = [startNode.id];
+    const placed   = { '0,0': startNode.id };
+    let roomCount  = 1;
+    let attempts   = 0;
+
+    while (roomCount < targetRooms && attempts < targetRooms * 30) {
+      attempts++;
+      if (frontier.length === 0) break;
+
+      const parentId = frontier[Math.floor(Math.random() * Math.min(frontier.length, 4))];
+      const parent   = nodes[parentId];
+
+      // Pick a direction offset — not limited to cardinal
+      // Use a wider set of offsets to create organic branching
+      const offsets = shuffle([
+        [1,0],[-1,0],[0,1],[0,-1],
+        [2,0],[-2,0],[0,2],[0,-2],
+        [1,1],[1,-1],[-1,1],[-1,-1],
+      ]);
+
+      let placed_this = false;
+      for (const [dx, dy] of offsets) {
+        const nx  = parent.sx + dx;
+        const ny  = parent.sy + dy;
+        const key = `${nx},${ny}`;
+        if (placed[key]) continue;
+
+        // Decide if we insert a corridor node between parent and new room
+        const useCorridor = chance(0.55) && roomCount > 1;
+        let prevId = parentId;
+
+        if (useCorridor) {
+          const corrNode = makeNode(NODE_TYPE.CORRIDOR, parent.sx + dx * 0.5, parent.sy + dy * 0.5);
+          corrNode.debugLog.push(`Corridor connecting rooms. Identity: ${corrNode.identity}`);
+          nodes[corrNode.id] = corrNode;
+          // Connect parent -> corridor
+          connectNodes(parentId, corrNode.id, false);
+          prevId = corrNode.id;
+        }
+
+        // Decide new node type
+        const newType = chance(0.15) && roomCount > 3 ? NODE_TYPE.CORRIDOR : NODE_TYPE.ROOM;
+        const newNode = makeNode(newType, nx, ny);
+        newNode.debugLog.push(`Generated as: ${newNode.type} — ${newNode.identity}`);
+        newNode.debugLog.push(`Build quality: ${newNode.quality}`);
+        if (newNode.repurposed) {
+          newNode.debugLog.push(`Repurposed: originally ${newNode.identity}, now used as ${newNode.repurposedAs}`);
+        }
+
+        nodes[newNode.id] = newNode;
+        placed[key]       = newNode.id;
+        frontier.push(newNode.id);
+        connectNodes(prevId, newNode.id, false);
+
+        if (newType === NODE_TYPE.ROOM) roomCount++;
+        placed_this = true;
+        break;
+      }
+    }
+
+    // Mark end node (deepest from start)
+    const endId = findDeepestNode(startNodeId);
+    nodes[endId].isEnd = true;
+    nodes[endId].debugLog.push('End room — staircase down is here.');
+
+    // Phase 4: secret layer
+    addSecretConnections();
   }
+
+  function findDeepestNode(startId) {
+    // BFS to find the node farthest from start
+    const visited = new Set([startId]);
+    let queue     = [startId];
+    let last      = startId;
+    while (queue.length) {
+      const next = [];
+      for (const id of queue) {
+        last = id;
+        for (const e of edges) {
+          const neighbor = e.fromId === id ? e.toId : e.toId === id ? e.fromId : null;
+          if (neighbor && !visited.has(neighbor)) {
+            visited.add(neighbor);
+            next.push(neighbor);
+          }
+        }
+      }
+      queue = next;
+    }
+    return last;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  PHASE 4 — SECRET LAYER
+  // ══════════════════════════════════════════════════════════
+
+  function addSecretConnections() {
+    const nodeList = Object.values(nodes);
+
+    // Try to add 2-4 secret connections between non-adjacent nodes
+    const secretCount = rnd(2, 4);
+    let added = 0;
+    let attempts = 0;
+
+    while (added < secretCount && attempts < 50) {
+      attempts++;
+      const a = pick(nodeList);
+      const b = pick(nodeList);
+      if (a.id === b.id) continue;
+
+      // Check they aren't already connected
+      const alreadyConnected = edges.some(
+        e => (e.fromId === a.id && e.toId === b.id) ||
+             (e.fromId === b.id && e.toId === a.id)
+      );
+      if (alreadyConnected) continue;
+
+      // Spatial proximity check — secret passages only between nearby nodes
+      const dist = Math.abs(a.sx - b.sx) + Math.abs(a.sy - b.sy);
+      if (dist > 3) continue;
+
+      connectNodes(a.id, b.id, true);
+      a.debugLog.push(`Secret passage to: ${b.identity} (${b.id})`);
+      b.debugLog.push(`Secret passage from: ${a.identity} (${a.id})`);
+      added++;
+    }
+
+    // Occasionally add a secret room hanging off an existing node
+    for (const node of nodeList) {
+      if (chance(0.12)) {
+        const secretNode = makeNode(NODE_TYPE.SECRET, node.sx + 0.3, node.sy + 0.3);
+        secretNode.debugLog.push('Secret chamber — hidden from normal navigation.');
+        nodes[secretNode.id] = secretNode;
+        connectNodes(node.id, secretNode.id, true);
+        node.debugLog.push(`Has secret chamber: ${secretNode.id}`);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  EXIT / CONNECTION SYSTEM
+  // ══════════════════════════════════════════════════════════
+
+  function makeExit(wall, offset, exitType, lock, secret) {
+    return {
+      id:              makeNodeId(),
+      wall,            // 'N' | 'S' | 'E' | 'W'
+      offset,          // 0.0–1.0 position along the wall
+      exitType,
+      lock,
+      connectedNodeId: null,
+      connectedExitId: null,
+      secret,
+      discovered:      !secret,  // secret exits start undiscovered
+    };
+  }
+
+  function pickExitType(secret) {
+    if (secret) return pick([EXIT_TYPE.CREVICE, EXIT_TYPE.BRICKED]);
+    const roll = Math.random();
+    if (roll < 0.25) return EXIT_TYPE.OPEN;
+    if (roll < 0.50) return EXIT_TYPE.DOOR_WOOD;
+    if (roll < 0.68) return EXIT_TYPE.DOOR_STRONG;
+    if (roll < 0.80) return EXIT_TYPE.DOOR_METAL;
+    if (roll < 0.90) return EXIT_TYPE.PORTCULLIS;
+    return EXIT_TYPE.BRICKED;
+  }
+
+  function pickLock(exitType, secret) {
+    if (secret) return LOCK.NONE;
+    if (exitType === EXIT_TYPE.DOOR_METAL || exitType === EXIT_TYPE.PORTCULLIS) {
+      if (chance(0.3)) return pick([LOCK.SKULL, LOCK.STAR]);
+    }
+    if (exitType === EXIT_TYPE.DOOR_STRONG && chance(0.15)) {
+      return pick([LOCK.SKULL, LOCK.STAR]);
+    }
+    return LOCK.NONE;
+  }
+
+  // Determine which wall and offset an exit should use between two spatially positioned nodes
+  function exitWallAndOffset(fromNode, toNode) {
+    const dx = toNode.sx - fromNode.sx;
+    const dy = toNode.sy - fromNode.sy;
+
+    // Primary wall based on dominant direction
+    let wall;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      wall = dx > 0 ? 'E' : 'W';
+    } else {
+      wall = dy > 0 ? 'S' : 'N';
+    }
+
+    // Offset varies based on secondary axis — this puts exits off-center
+    let offset;
+    if (wall === 'E' || wall === 'W') {
+      // Offset along vertical — influenced by dy
+      offset = 0.5 + (dy / 4) * 0.3;
+    } else {
+      // Offset along horizontal — influenced by dx
+      offset = 0.5 + (dx / 4) * 0.3;
+    }
+
+    // Clamp and add small random variation
+    offset = Math.max(0.2, Math.min(0.8, offset + (Math.random() - 0.5) * 0.15));
+    return { wall, offset };
+  }
+
+  function oppositeWall(wall) {
+    return { N: 'S', S: 'N', E: 'W', W: 'E' }[wall];
+  }
+
+  function connectNodes(fromId, toId, secret) {
+    const from = nodes[fromId];
+    const to   = nodes[toId];
+    if (!from || !to) return;
+
+    const exitType = pickExitType(secret);
+    const lock     = pickLock(exitType, secret);
+
+    const { wall: wallA, offset: offA } = exitWallAndOffset(from, to);
+    const wallB  = oppositeWall(wallA);
+    const offB   = 1 - offA;
+
+    const exitA = makeExit(wallA, offA, exitType, lock, secret);
+    const exitB = makeExit(wallB, offB, exitType, lock, secret);
+
+    exitA.connectedNodeId = toId;
+    exitA.connectedExitId = exitB.id;
+    exitB.connectedNodeId = fromId;
+    exitB.connectedExitId = exitA.id;
+
+    from.exits.push(exitA);
+    to.exits.push(exitB);
+
+    edges.push({ fromId, toId, fromExitId: exitA.id, toExitId: exitB.id, secret });
+
+    if (!secret) {
+      from.debugLog.push(`Exit ${wallA} (offset ${offA.toFixed(2)}): ${exitType}${lock ? ' [locked: '+lock+']' : ''} → ${to.identity}`);
+      to.debugLog.push(`Exit ${wallB} (offset ${offB.toFixed(2)}): ${exitType}${lock ? ' [locked: '+lock+']' : ''} → ${from.identity}`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  PHASE 3 — SCREEN / TILE GRID GENERATION
+  // ══════════════════════════════════════════════════════════
+
+  function buildAllScreens() {
+    for (const node of Object.values(nodes)) {
+      node.grid = buildScreen(node);
+    }
+  }
+
+  function buildScreen(node) {
+    const { cols, rows, type, identity, quality } = node;
+
+    let grid;
+    if (type === NODE_TYPE.CORRIDOR) {
+      grid = buildCorridorScreen(cols, rows, identity);
+    } else if (type === NODE_TYPE.SECRET) {
+      grid = buildSecretScreen(cols, rows);
+    } else {
+      grid = buildRoomScreen(cols, rows, identity, quality);
+    }
+
+    // Carve exits into the grid
+    for (const exit of node.exits) {
+      if (!exit.discovered && exit.exitType === EXIT_TYPE.CREVICE) continue; // hidden
+      carveExit(grid, exit, cols, rows);
+    }
+
+    return grid;
+  }
+
+  // ── Room screen ──────────────────────────────────────────
+  function buildRoomScreen(cols, rows, identity, quality) {
+    const grid = makeGrid(cols, rows, TILE.WALL);
+
+    // Base floor shape
+    if (quality === 'crude' || quality === 'rough') {
+      // Irregular edges
+      for (let y = 1; y < rows - 1; y++) {
+        for (let x = 1; x < cols - 1; x++) {
+          const edge = (x === 1 || x === cols-2 || y === 1 || y === rows-2);
+          if (edge && chance(0.15)) continue; // leave some wall nubs
+          grid[y][x] = TILE.FLOOR;
+        }
+      }
+    } else {
+      // Clean rectangular floor
+      for (let y = 1; y < rows - 1; y++)
+        for (let x = 1; x < cols - 1; x++)
+          grid[y][x] = TILE.FLOOR;
+    }
+
+    // Add structural features based on identity
+    addRoomFeatures(grid, cols, rows, identity, quality);
+
+    return grid;
+  }
+
+  function addRoomFeatures(grid, cols, rows, identity, quality) {
+    const cx = Math.floor(cols / 2);
+    const cy = Math.floor(rows / 2);
+
+    switch (identity) {
+      case 'grand_hall':
+        // Rows of pillars
+        addPillarRows(grid, cols, rows, quality);
+        break;
+
+      case 'worship_room':
+        // Central altar block
+        addBlock(grid, cx - 1, cy - 2, 3, 4);
+        if (quality === 'ornate' || quality === 'fine') {
+          addPillarRows(grid, cols, rows, quality);
+        }
+        break;
+
+      case 'burial_chamber':
+        // Sarcophagi arranged in rows
+        addSarcophagi(grid, cols, rows);
+        break;
+
+      case 'barracks':
+        // Rows of cot-sized blocks along walls
+        addBarracksCots(grid, cols, rows);
+        break;
+
+      case 'prison':
+        // Cell dividers
+        addPrisonCells(grid, cols, rows);
+        break;
+
+      case 'library':
+        // Bookshelf rows
+        addShelfRows(grid, cols, rows);
+        break;
+
+      case 'treasury':
+        // Scattered chest blocks
+        addScatteredBlocks(grid, cols, rows, 3, 6, 1, 1);
+        break;
+
+      case 'guardroom':
+        // Central table block
+        addBlock(grid, cx - 1, cy - 1, 3, 2);
+        break;
+
+      case 'kitchen':
+        // Counter along one wall
+        addWallCounter(grid, cols, rows);
+        break;
+
+      case 'armory':
+        // Rack rows
+        addShelfRows(grid, cols, rows);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  // ── Feature helpers ──────────────────────────────────────
+
+  function addBlock(grid, x, y, w, h) {
+    for (let dy = 0; dy < h; dy++)
+      for (let dx = 0; dx < w; dx++)
+        setTile(grid, x + dx, y + dy, TILE.WALL);
+  }
+
+  function addPillarRows(grid, cols, rows, quality) {
+    const spacingX = quality === 'ornate' ? 4 : 5;
+    const spacingY = quality === 'ornate' ? 4 : 5;
+    for (let y = 2; y < rows - 2; y += spacingY) {
+      for (let x = 2; x < cols - 2; x += spacingX) {
+        setTile(grid, x, y, TILE.WALL);
+      }
+    }
+  }
+
+  function addSarcophagi(grid, cols, rows) {
+    const startX = 3;
+    const startY = 3;
+    for (let row = 0; row < 2; row++) {
+      for (let col = 0; col < Math.floor((cols - 4) / 4); col++) {
+        const x = startX + col * 4;
+        const y = startY + row * (rows - 8);
+        addBlock(grid, x, y, 2, 1);
+      }
+    }
+  }
+
+  function addBarracksCots(grid, cols, rows) {
+    // Cots along N and S walls
+    for (let x = 2; x < cols - 2; x += 3) {
+      setTile(grid, x, 2, TILE.WALL);
+      setTile(grid, x, rows - 3, TILE.WALL);
+    }
+  }
+
+  function addPrisonCells(grid, cols, rows) {
+    // Vertical dividers creating cells
+    const cellW = 4;
+    for (let x = cellW; x < cols - 1; x += cellW) {
+      for (let y = 1; y < rows - 2; y++)
+        setTile(grid, x, y, TILE.WALL);
+      // Leave a gap for the cell door
+      setTile(grid, x, Math.floor((rows - 1) / 2), TILE.FLOOR);
+    }
+  }
+
+  function addShelfRows(grid, cols, rows) {
+    for (let y = 2; y < rows - 2; y += 3) {
+      for (let x = 2; x < cols - 2; x++) {
+        if (x % 6 < 4) setTile(grid, x, y, TILE.WALL);
+      }
+    }
+  }
+
+  function addScatteredBlocks(grid, cols, rows, minN, maxN, w, h) {
+    const count = rnd(minN, maxN);
+    for (let i = 0; i < count; i++) {
+      const x = rnd(2, cols - 3 - w);
+      const y = rnd(2, rows - 3 - h);
+      addBlock(grid, x, y, w, h);
+    }
+  }
+
+  function addWallCounter(grid, cols, rows) {
+    // Counter along east wall
+    for (let y = 2; y < rows - 2; y++)
+      setTile(grid, cols - 3, y, TILE.WALL);
+  }
+
+  // ── Corridor screen ──────────────────────────────────────
+  function buildCorridorScreen(cols, rows, identity) {
+    const grid = makeGrid(cols, rows, TILE.WALL);
+    const isHoriz = cols > rows;
+
+    if (identity === 'natural_cave_passage' || identity === 'rough_tunnel') {
+      // Organic passage
+      if (isHoriz) {
+        const mid = Math.floor(rows / 2);
+        for (let x = 1; x < cols - 1; x++) {
+          const wobble = Math.round((Math.random() - 0.5) * 1.5);
+          const hw = 1 + (chance(0.3) ? 1 : 0);
+          for (let dy = -hw; dy <= hw; dy++)
+            setTile(grid, x, mid + wobble + dy, TILE.FLOOR);
+        }
+      } else {
+        const mid = Math.floor(cols / 2);
+        for (let y = 1; y < rows - 1; y++) {
+          const wobble = Math.round((Math.random() - 0.5) * 1.5);
+          const hw = 1 + (chance(0.3) ? 1 : 0);
+          for (let dx = -hw; dx <= hw; dx++)
+            setTile(grid, mid + wobble + dx, y, TILE.FLOOR);
+        }
+      }
+    } else {
+      // Clean corridor
+      if (isHoriz) {
+        for (let y = 1; y < rows - 1; y++)
+          for (let x = 1; x < cols - 1; x++)
+            grid[y][x] = TILE.FLOOR;
+      } else {
+        for (let y = 1; y < rows - 1; y++)
+          for (let x = 1; x < cols - 1; x++)
+            grid[y][x] = TILE.FLOOR;
+      }
+    }
+    return grid;
+  }
+
+  // ── Secret screen ────────────────────────────────────────
+  function buildSecretScreen(cols, rows) {
+    const grid = makeGrid(cols, rows, TILE.WALL);
+    // Small irregular chamber
+    for (let y = 2; y < rows - 2; y++)
+      for (let x = 2; x < cols - 2; x++)
+        if (!chance(0.1)) grid[y][x] = TILE.FLOOR;
+    return grid;
+  }
+
+  // ── Exit carving ─────────────────────────────────────────
+  function carveExit(grid, exit, cols, rows) {
+    const { wall, offset, exitType } = exit;
+    // Width of opening: 1 for crevice/secret, 2 for most, 3 for open/grand
+    const w = exitType === EXIT_TYPE.CREVICE ? 1
+            : exitType === EXIT_TYPE.OPEN     ? 3
+            : 2;
+
+    if (wall === 'N' || wall === 'S') {
+      const y   = wall === 'N' ? 0 : rows - 1;
+      const cx  = Math.round(offset * (cols - 1));
+      const y2  = wall === 'N' ? 1 : rows - 2;
+      for (let dx = -Math.floor(w/2); dx <= Math.floor(w/2); dx++) {
+        setTile(grid, cx + dx, y,  TILE.FLOOR);
+        setTile(grid, cx + dx, y2, TILE.FLOOR);
+      }
+    } else {
+      const x   = wall === 'W' ? 0 : cols - 1;
+      const cy  = Math.round(offset * (rows - 1));
+      const x2  = wall === 'W' ? 1 : cols - 2;
+      for (let dy = -Math.floor(w/2); dy <= Math.floor(w/2); dy++) {
+        setTile(grid, x,  cy + dy, TILE.FLOOR);
+        setTile(grid, x2, cy + dy, TILE.FLOOR);
+      }
+    }
+  }
+
+  // ── Spawn position for entering from a direction ─────────
+  function spawnForExit(node, exit) {
+    const cols = node.cols;
+    const rows = node.rows;
+    const wall = exit.wall;
+    const cx   = Math.round(exit.offset * (cols - 1));
+    const cy   = Math.round(exit.offset * (rows - 1));
+
+    switch (wall) {
+      case 'N': return { x: cx, y: 2 };
+      case 'S': return { x: cx, y: rows - 3 };
+      case 'E': return { x: cols - 3, y: cy };
+      case 'W': return { x: 2, y: cy };
+      default:  return { x: Math.floor(cols/2), y: Math.floor(rows/2) };
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  WALKABILITY
+  // ══════════════════════════════════════════════════════════
 
   function isWalkable(x, y) {
     const t = getCurrentTile(x, y);
-    return t === TILE.FLOOR ||
-           t === TILE.DOOR_N || t === TILE.DOOR_S ||
-           t === TILE.DOOR_E || t === TILE.DOOR_W ||
-           t === TILE.STAIR_DOWN || t === TILE.STAIR_UP;
+    return t === TILE.FLOOR || t === TILE.STAIR_DOWN || t === TILE.STAIR_UP;
   }
 
-  // Check if a position is a door and return which dir, or null
-  function checkDoor(x, y) {
-    const t = getCurrentTile(x, y);
-    if (t === TILE.DOOR_N) return DIR.N;
-    if (t === TILE.DOOR_S) return DIR.S;
-    if (t === TILE.DOOR_E) return DIR.E;
-    if (t === TILE.DOOR_W) return DIR.W;
+  // Check if position is an exit tile; return the exit object or null
+  function checkExit(x, y) {
+    if (!currentNode) return null;
+    const cols = currentNode.cols;
+    const rows = currentNode.rows;
+
+    for (const exit of currentNode.exits) {
+      if (!exit.discovered) continue;
+      const wall = exit.wall;
+      if (wall === 'N' || wall === 'S') {
+        const ey  = wall === 'N' ? 0 : rows - 1;
+        const ecx = Math.round(exit.offset * (cols - 1));
+        const w   = exit.exitType === EXIT_TYPE.OPEN ? 1 : 0;
+        if (y === ey && Math.abs(x - ecx) <= w) return exit;
+      } else {
+        const ex  = wall === 'W' ? 0 : cols - 1;
+        const ecy = Math.round(exit.offset * (rows - 1));
+        const w   = exit.exitType === EXIT_TYPE.OPEN ? 1 : 0;
+        if (x === ex && Math.abs(y - ecy) <= w) return exit;
+      }
+    }
     return null;
   }
 
-  // ── Color palette ────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════
+  //  MAIN GENERATE
+  // ══════════════════════════════════════════════════════════
+
+  function generate(targetRooms = 14) {
+    depth = 1;
+    generateGraph(targetRooms);
+    buildAllScreens();
+
+    // Place stair in end node
+    const endNode = Object.values(nodes).find(n => n.isEnd);
+    if (endNode && endNode.grid) {
+      const cx = Math.floor(endNode.cols / 2);
+      const cy = Math.floor(endNode.rows / 2);
+      setTile(endNode.grid, cx, cy, TILE.STAIR_DOWN);
+    }
+
+    currentNode = nodes[startNodeId];
+    currentNode.visited = true;
+
+    return { nodes, startNodeId, currentNode, depth, TILE };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  TRANSITION
+  // ══════════════════════════════════════════════════════════
+
+  function enterNode(nodeId, fromExitId) {
+    currentNode = nodes[nodeId];
+    currentNode.visited = true;
+
+    // Find the matching exit in the new node
+    const entryExit = currentNode.exits.find(e => e.id === fromExitId);
+    const spawnPos  = entryExit
+      ? spawnForExit(currentNode, entryExit)
+      : { x: Math.floor(currentNode.cols / 2), y: Math.floor(currentNode.rows / 2) };
+
+    return { node: currentNode, spawnPos };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  RENDERING
+  // ══════════════════════════════════════════════════════════
+
   const COLOR = {
-    void:      '#0a0a0f',
-    floor:     '#2a2535',
-    floorAlt:  '#252030',
-    wall:      '#1a1520',
-    wallTop:   '#3d3550',
-    wallFace:  '#141018',
-    door:      '#4a3a20',
-    doorFrame: '#c8a96e',
-    stairDown: '#2a4a2a',
-    stairIcon: '#c8a96e',
-    player:    '#c8a96e',
-    playerOut: '#0a0a0f',
-    gridLine:  '#1e1a28',
+    void:        '#0a0a0f',
+    floor:       '#2a2535',
+    floorAlt:    '#252030',
+    wall:        '#1a1520',
+    wallTop:     '#3d3550',
+    wallFace:    '#141018',
+    gridLine:    '#1e1a28',
+    exitOpen:    '#3a3020',
+    exitWood:    '#4a3218',
+    exitStrong:  '#3a2810',
+    exitMetal:   '#282838',
+    exitPort:    '#1e1e30',
+    exitCrevice: '#181418',
+    exitBricked: '#1e1820',
+    exitFrame:   '#c8a96e',
+    lockSkull:   '#c04040',
+    lockStar:    '#c8a96e',
+    stairDown:   '#2a4a2a',
+    stairIcon:   '#c8a96e',
+    player:      '#c8a96e',
+    playerOut:   '#0a0a0f',
+    secret:      '#1a0a1a',
   };
 
-  // ── Wall bitmask ─────────────────────────────────────────
-  // 4-bit mask: N=1 W=2 E=4 S=8 — neighbor is also a wall/void?
+  // Wall bitmask for seamless walls
   function wallMask(grid, x, y) {
     let mask = 0;
-    if (getTile(grid, x, y-1) === TILE.WALL || getTile(grid, x, y-1) === TILE.VOID) mask |= 1;  // N
-    if (getTile(grid, x-1, y) === TILE.WALL || getTile(grid, x-1, y) === TILE.VOID) mask |= 2;  // W
-    if (getTile(grid, x+1, y) === TILE.WALL || getTile(grid, x+1, y) === TILE.VOID) mask |= 4;  // E
-    if (getTile(grid, x, y+1) === TILE.WALL || getTile(grid, x, y+1) === TILE.VOID) mask |= 8;  // S
+    const isOpaque = (tx, ty) => {
+      const t = getTile(grid, tx, ty);
+      return t === TILE.WALL || t === TILE.VOID;
+    };
+    if (isOpaque(x, y-1)) mask |= 1;  // N
+    if (isOpaque(x-1, y)) mask |= 2;  // W
+    if (isOpaque(x+1, y)) mask |= 4;  // E
+    if (isOpaque(x, y+1)) mask |= 8;  // S
     return mask;
   }
 
-  // ── Tile renderer ────────────────────────────────────────
   function drawTile(ctx, grid, tileType, px, py, col, row) {
     const s = TILE_SIZE;
 
@@ -419,44 +873,18 @@ const Dungeon = (() => {
 
       case TILE.WALL: {
         const mask = wallMask(grid, col, row);
-        // Base wall
         ctx.fillStyle = COLOR.wall;
         ctx.fillRect(px, py, s, s);
-
-        // If floor is to the south (mask bit 8 NOT set), draw a lit top face
         if (!(mask & 8)) {
           ctx.fillStyle = COLOR.wallTop;
           ctx.fillRect(px, py, s, 5);
-          // Dark face below the top highlight
           ctx.fillStyle = COLOR.wallFace;
           ctx.fillRect(px, py + 5, s, 8);
         }
-
-        // Left edge shadow if wall to west
         if (mask & 2) {
-          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fillStyle = 'rgba(0,0,0,0.2)';
           ctx.fillRect(px, py, 3, s);
         }
-        break;
-      }
-
-      case TILE.DOOR_N:
-      case TILE.DOOR_S:
-      case TILE.DOOR_E:
-      case TILE.DOOR_W: {
-        ctx.fillStyle = COLOR.door;
-        ctx.fillRect(px, py, s, s);
-        // Door frame accent
-        ctx.strokeStyle = COLOR.doorFrame;
-        ctx.lineWidth = 2;
-        ctx.strokeRect(px + 3, py + 3, s - 6, s - 6);
-        // Arrow hint
-        ctx.fillStyle = COLOR.doorFrame;
-        ctx.font = `${Math.floor(s * 0.5)}px monospace`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const arrows = { [TILE.DOOR_N]: '↑', [TILE.DOOR_S]: '↓', [TILE.DOOR_E]: '→', [TILE.DOOR_W]: '←' };
-        ctx.fillText(arrows[tileType], px + s/2, py + s/2);
         break;
       }
 
@@ -466,19 +894,75 @@ const Dungeon = (() => {
         ctx.strokeStyle = COLOR.stairIcon;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(px + s*0.25, py + s*0.3);
-        ctx.lineTo(px + s*0.5,  py + s*0.55);
-        ctx.lineTo(px + s*0.75, py + s*0.3);
-        ctx.moveTo(px + s*0.25, py + s*0.5);
-        ctx.lineTo(px + s*0.5,  py + s*0.75);
-        ctx.lineTo(px + s*0.75, py + s*0.5);
+        ctx.moveTo(px+s*0.25, py+s*0.3);
+        ctx.lineTo(px+s*0.5,  py+s*0.55);
+        ctx.lineTo(px+s*0.75, py+s*0.3);
+        ctx.moveTo(px+s*0.25, py+s*0.5);
+        ctx.lineTo(px+s*0.5,  py+s*0.75);
+        ctx.lineTo(px+s*0.75, py+s*0.5);
         ctx.stroke();
         break;
       }
     }
   }
 
-  // ── Player renderer ──────────────────────────────────────
+  function drawExits(ctx, node, originX, originY) {
+    if (!node || !node.exits) return;
+    const cols = node.cols;
+    const rows = node.rows;
+    const s    = TILE_SIZE;
+
+    for (const exit of node.exits) {
+      if (!exit.discovered) continue;
+
+      const wall = exit.wall;
+      let px, py;
+
+      if (wall === 'N' || wall === 'S') {
+        const ecx = Math.round(exit.offset * (cols - 1));
+        px = originX + ecx * s;
+        py = originY + (wall === 'N' ? 0 : (rows - 1) * s);
+      } else {
+        const ecy = Math.round(exit.offset * (rows - 1));
+        px = originX + (wall === 'W' ? 0 : (cols - 1) * s);
+        py = originY + ecy * s;
+      }
+
+      // Exit color by type
+      const exitColors = {
+        [EXIT_TYPE.OPEN]:        COLOR.exitOpen,
+        [EXIT_TYPE.DOOR_WOOD]:   COLOR.exitWood,
+        [EXIT_TYPE.DOOR_STRONG]: COLOR.exitStrong,
+        [EXIT_TYPE.DOOR_METAL]:  COLOR.exitMetal,
+        [EXIT_TYPE.PORTCULLIS]:  COLOR.exitPort,
+        [EXIT_TYPE.CREVICE]:     COLOR.exitCrevice,
+        [EXIT_TYPE.BRICKED]:     COLOR.exitBricked,
+      };
+      ctx.fillStyle = exitColors[exit.exitType] || COLOR.exitWood;
+      ctx.fillRect(px, py, s, s);
+
+      // Frame
+      ctx.strokeStyle = COLOR.exitFrame;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(px + 2, py + 2, s - 4, s - 4);
+
+      // Lock symbol
+      if (exit.lock === LOCK.SKULL) {
+        ctx.fillStyle = COLOR.lockSkull;
+        ctx.font = `${Math.floor(s * 0.45)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('☠', px + s/2, py + s/2);
+      } else if (exit.lock === LOCK.STAR) {
+        ctx.fillStyle = COLOR.lockStar;
+        ctx.font = `${Math.floor(s * 0.45)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('★', px + s/2, py + s/2);
+      }
+    }
+  }
+
   function drawPlayer(ctx, px, py) {
     const s  = TILE_SIZE;
     const cx = px + s / 2;
@@ -486,12 +970,12 @@ const Dungeon = (() => {
     const r  = s * 0.28;
 
     ctx.beginPath();
-    ctx.ellipse(cx, cy + r * 0.8, r * 0.7, r * 0.25, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, cy + r*0.8, r*0.7, r*0.25, 0, 0, Math.PI*2);
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
     ctx.fillStyle = COLOR.player;
     ctx.fill();
     ctx.strokeStyle = COLOR.playerOut;
@@ -499,44 +983,41 @@ const Dungeon = (() => {
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(cx, cy + r * 0.35, r * 0.22, 0, Math.PI * 2);
+    ctx.arc(cx, cy + r*0.35, r*0.22, 0, Math.PI*2);
     ctx.fillStyle = COLOR.playerOut;
     ctx.fill();
   }
 
-  // ── Main render ──────────────────────────────────────────
   function render(canvas, playerPos) {
-    if (!currentRoom) return;
+    if (!currentNode || !currentNode.grid) return;
     const ctx  = canvas.getContext('2d');
     const W    = canvas.width;
     const H    = canvas.height;
-    const grid = currentRoom.grid;
-    const rows = grid.length;
-    const cols = grid[0].length;
+    const grid = currentNode.grid;
+    const rows = currentNode.rows;
+    const cols = currentNode.cols;
+    const s    = TILE_SIZE;
 
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = COLOR.void;
     ctx.fillRect(0, 0, W, H);
 
-    // Center room on canvas
-    const roomPixelW = cols * TILE_SIZE;
-    const roomPixelH = rows * TILE_SIZE;
-    const originX    = Math.floor((W - roomPixelW) / 2);
-    const originY    = Math.floor((H - roomPixelH) / 2);
+    const originX = Math.floor((W - cols * s) / 2);
+    const originY = Math.floor((H - rows * s) / 2);
 
+    // Draw tiles
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const tileType = getTile(grid, col, row);
-        const px = originX + col * TILE_SIZE;
-        const py = originY + row * TILE_SIZE;
-        drawTile(ctx, grid, tileType, px, py, col, row);
+        drawTile(ctx, grid, tileType, originX + col*s, originY + row*s, col, row);
       }
     }
 
+    // Draw exits on top
+    drawExits(ctx, currentNode, originX, originY);
+
     // Draw player
-    const ppx = originX + playerPos.x * TILE_SIZE;
-    const ppy = originY + playerPos.y * TILE_SIZE;
-    drawPlayer(ctx, ppx, ppy);
+    drawPlayer(ctx, originX + playerPos.x * s, originY + playerPos.y * s);
 
     // Vignette
     const vignette = ctx.createRadialGradient(W/2, H/2, H*0.25, W/2, H/2, H*0.8);
@@ -546,134 +1027,189 @@ const Dungeon = (() => {
     ctx.fillRect(0, 0, W, H);
   }
 
-  // ── Minimap renderer ─────────────────────────────────────
-  // Draws an overlay showing all rooms as boxes with connection lines
+  // ══════════════════════════════════════════════════════════
+  //  MINIMAP
+  // ══════════════════════════════════════════════════════════
+
   const MINI = {
-    roomW:    28,
-    roomH:    20,
-    gapX:     18,
-    gapY:     14,
-    padding:  20,
-    bg:       'rgba(0,0,0,0.82)',
-    visited:  '#3a3050',
-    unvisited:'#1a1828',
-    current:  '#c8a96e',
-    start:    '#2a4a2a',
-    end:      '#4a2020',
-    connector:'#4a4060',
-    border:   '#2a2a3a',
-    text:     '#c8a96e',
+    roomW:   24, roomH: 18, gapX: 20, gapY: 16, padding: 24,
+    bg:       'rgba(0,0,0,0.88)',
+    visited:  '#3a3050', unvisited: '#1a1828',
+    current:  '#c8a96e', start: '#2a4a2a', end: '#4a2020',
+    secret:   '#3a1a3a', corridor: '#252035',
+    connector:'#3a3455', secretLine: '#5a2a5a',
+    border:   '#2a2a3a', text: '#c8a96e',
   };
 
   function renderMinimap(canvas) {
-    if (!currentRoom) return;
-    const ctx = canvas.getContext('2d');
-    const W   = canvas.width;
-    const H   = canvas.height;
+    if (!currentNode) return;
+    const ctx      = canvas.getContext('2d');
+    const W        = canvas.width;
+    const H        = canvas.height;
+    const nodeList = Object.values(nodes);
 
-    // Find bounding box of all rooms in grid space
-    const roomList = Object.values(rooms);
-    let minGX = Infinity, maxGX = -Infinity;
-    let minGY = Infinity, maxGY = -Infinity;
-    for (const r of roomList) {
-      if (r.gx < minGX) minGX = r.gx;
-      if (r.gx > maxGX) maxGX = r.gx;
-      if (r.gy < minGY) minGY = r.gy;
-      if (r.gy > maxGY) maxGY = r.gy;
+    // Find bounds
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of nodeList) {
+      if (n.sx < minX) minX = n.sx; if (n.sx > maxX) maxX = n.sx;
+      if (n.sy < minY) minY = n.sy; if (n.sy > maxY) maxY = n.sy;
     }
 
-    const gridW = maxGX - minGX + 1;
-    const gridH = maxGY - minGY + 1;
-    const mapW  = gridW * (MINI.roomW + MINI.gapX) - MINI.gapX + MINI.padding * 2;
-    const mapH  = gridH * (MINI.roomH + MINI.gapY) - MINI.gapY + MINI.padding * 2;
+    const scaleX = MINI.roomW + MINI.gapX;
+    const scaleY = MINI.roomH + MINI.gapY;
+    const mapW   = (maxX - minX + 1) * scaleX + MINI.padding * 2;
+    const mapH   = (maxY - minY + 1) * scaleY + MINI.padding * 2;
+    const ox     = Math.floor((W - mapW) / 2);
+    const oy     = Math.floor((H - mapH) / 2);
 
-    const originX = Math.floor((W - mapW) / 2);
-    const originY = Math.floor((H - mapH) / 2);
-
-    // Background panel
     ctx.fillStyle = MINI.bg;
     ctx.beginPath();
-    ctx.roundRect(originX, originY, mapW, mapH, 8);
+    ctx.roundRect(ox, oy, mapW, mapH, 10);
     ctx.fill();
     ctx.strokeStyle = MINI.border;
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Helper: grid pos to screen pos (center of room box)
-    function roomScreenPos(gx, gy) {
+    function nodeScreen(n) {
       return {
-        sx: originX + MINI.padding + (gx - minGX) * (MINI.roomW + MINI.gapX) + MINI.roomW / 2,
-        sy: originY + MINI.padding + (gy - minGY) * (MINI.roomH + MINI.gapY) + MINI.roomH / 2,
+        sx: ox + MINI.padding + (n.sx - minX) * scaleX + MINI.roomW / 2,
+        sy: oy + MINI.padding + (n.sy - minY) * scaleY + MINI.roomH / 2,
       };
     }
 
-    // Draw connectors first (behind rooms)
-    ctx.strokeStyle = MINI.connector;
-    ctx.lineWidth = 2;
-    for (const room of roomList) {
-      const { sx: ax, sy: ay } = roomScreenPos(room.gx, room.gy);
-      for (const dir of Object.keys(room.doors)) {
-        const connId  = room.doors[dir];
-        const conn    = rooms[connId];
-        if (!conn) continue;
-        const { sx: bx, sy: by } = roomScreenPos(conn.gx, conn.gy);
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        ctx.lineTo(bx, by);
-        ctx.stroke();
-      }
+    // Draw edges
+    for (const e of edges) {
+      const a = nodes[e.fromId], b = nodes[e.toId];
+      if (!a || !b) continue;
+      const { sx: ax, sy: ay } = nodeScreen(a);
+      const { sx: bx, sy: by } = nodeScreen(b);
+      ctx.strokeStyle = e.secret ? MINI.secretLine : MINI.connector;
+      ctx.lineWidth   = e.secret ? 1 : 1.5;
+      ctx.setLineDash(e.secret ? [3, 3] : []);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
     }
+    ctx.setLineDash([]);
 
-    // Draw room boxes
-    for (const room of roomList) {
-      const { sx, sy } = roomScreenPos(room.gx, room.gy);
+    // Draw nodes
+    for (const n of nodeList) {
+      const { sx, sy } = nodeScreen(n);
       const rx = sx - MINI.roomW / 2;
       const ry = sy - MINI.roomH / 2;
+      const rw = n.type === NODE_TYPE.CORRIDOR ? MINI.roomW * 0.6 : MINI.roomW;
+      const rh = n.type === NODE_TYPE.CORRIDOR ? MINI.roomH * 0.6 : MINI.roomH;
 
-      if (room.id === currentRoom.id) {
-        ctx.fillStyle = MINI.current;
-      } else if (room.isStart) {
-        ctx.fillStyle = MINI.start;
-      } else if (room.isEnd) {
-        ctx.fillStyle = MINI.end;
-      } else if (room.visited) {
-        ctx.fillStyle = MINI.visited;
-      } else {
-        ctx.fillStyle = MINI.unvisited;
-      }
+      if      (n.id === currentNode.id) ctx.fillStyle = MINI.current;
+      else if (n.type === NODE_TYPE.SECRET) ctx.fillStyle = MINI.secret;
+      else if (n.isStart)               ctx.fillStyle = MINI.start;
+      else if (n.isEnd)                 ctx.fillStyle = MINI.end;
+      else if (n.type === NODE_TYPE.CORRIDOR) ctx.fillStyle = MINI.corridor;
+      else if (n.visited)               ctx.fillStyle = MINI.visited;
+      else                              ctx.fillStyle = MINI.unvisited;
 
       ctx.beginPath();
-      ctx.roundRect(rx, ry, MINI.roomW, MINI.roomH, 3);
+      ctx.roundRect(rx, ry, rw, rh, 2);
       ctx.fill();
       ctx.strokeStyle = MINI.border;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 0.5;
       ctx.stroke();
     }
 
-    // Label
-    ctx.fillStyle = MINI.text;
-    ctx.font      = '11px monospace';
-    ctx.textAlign = 'center';
+    ctx.fillStyle    = MINI.text;
+    ctx.font         = '11px monospace';
+    ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
-    ctx.fillText('MAP  [M]', originX + mapW / 2, originY + mapH - 6);
+    ctx.fillText('MAP  [M]', ox + mapW / 2, oy + mapH - 6);
   }
 
-  // ── Public API ───────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════
+  //  DEBUG OVERLAY
+  // ══════════════════════════════════════════════════════════
+
+  function renderDebug(canvas) {
+    if (!currentNode) return;
+    const ctx  = canvas.getContext('2d');
+    const W    = canvas.width;
+    const n    = currentNode;
+
+    const lines = [
+      `NODE: ${n.id}`,
+      `TYPE: ${n.type}`,
+      `IDENTITY: ${n.identity}`,
+      `QUALITY: ${n.quality}`,
+      n.repurposed ? `REPURPOSED AS: ${n.repurposedAs}` : null,
+      `SIZE: ${n.cols} × ${n.rows}`,
+      `EXITS: ${n.exits.length}`,
+      `VISITED: ${n.visited}`,
+      n.isStart ? '★ START ROOM' : null,
+      n.isEnd   ? '▼ END ROOM (stair down)' : null,
+      '─────────────────────',
+      ...n.debugLog,
+    ].filter(Boolean);
+
+    const pad  = 14;
+    const lh   = 18;
+    const panW = 340;
+    const panH = pad * 2 + lines.length * lh;
+    const px   = W - panW - 16;
+    const py   = 16;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.beginPath();
+    ctx.roundRect(px, py, panW, panH, 6);
+    ctx.fill();
+    ctx.strokeStyle = '#c8a96e44';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.font         = '12px monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    lines.forEach((line, i) => {
+      if (line.startsWith('NODE') || line.startsWith('─')) {
+        ctx.fillStyle = '#c8a96e';
+      } else if (line.startsWith('★') || line.startsWith('▼')) {
+        ctx.fillStyle = '#90e090';
+      } else if (line.includes('secret') || line.includes('Secret')) {
+        ctx.fillStyle = '#c090e0';
+      } else {
+        ctx.fillStyle = '#c4c0ba';
+      }
+      ctx.fillText(line, px + pad, py + pad + i * lh);
+    });
+
+    // D key hint
+    ctx.fillStyle    = '#6e6a60';
+    ctx.font         = '10px monospace';
+    ctx.textAlign    = 'right';
+    ctx.fillText('[D] debug', px + panW - 8, py + panH - 14);
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  PUBLIC API
+  // ══════════════════════════════════════════════════════════
+
   return {
     TILE,
-    DIR,
-    OPPOSITE,
+    EXIT_TYPE,
+    LOCK,
     generate,
-    enterRoom,
+    enterNode,
     render,
+    renderMinimap,
+    renderDebug,
     getCurrentTile,
     isWalkable,
-    checkDoor,
-    renderMinimap,
-    get currentRoom() { return currentRoom; },
-    get rooms()       { return rooms; },
-    get startRoomId() { return startRoomId; },
-    get depth()       { return depth; },
+    checkExit,
+    get currentNode()  { return currentNode; },
+    get nodes()        { return nodes; },
+    get startNodeId()  { return startNodeId; },
+    get depth()        { return depth; },
+    get debugOpen()    { return debugOpen; },
+    set debugOpen(v)   { debugOpen = v; },
   };
 
 })();
