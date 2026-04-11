@@ -160,6 +160,19 @@ const Dungeon = (() => {
       for (let dx = -2; dx <= 2; dx++)
         setTile(grid, cx+dx, cy+dy, TILE.FLOOR);
 
+    // Carve guaranteed corridors from center to each edge midpoint
+    // so doors placed later are never blocked by cave walls
+    const midC = Math.floor(cols / 2);
+    const midR = Math.floor(rows / 2);
+    // North corridor
+    for (let y = 1; y <= midR; y++) setTile(grid, midC, y, TILE.FLOOR);
+    // South corridor
+    for (let y = midR; y < rows - 1; y++) setTile(grid, midC, y, TILE.FLOOR);
+    // West corridor
+    for (let x = 1; x <= midC; x++) setTile(grid, x, midR, TILE.FLOOR);
+    // East corridor
+    for (let x = midC; x < cols - 1; x++) setTile(grid, x, midR, TILE.FLOOR);
+
     return grid;
   }
 
@@ -533,6 +546,118 @@ const Dungeon = (() => {
     ctx.fillRect(0, 0, W, H);
   }
 
+  // ── Minimap renderer ─────────────────────────────────────
+  // Draws an overlay showing all rooms as boxes with connection lines
+  const MINI = {
+    roomW:    28,
+    roomH:    20,
+    gapX:     18,
+    gapY:     14,
+    padding:  20,
+    bg:       'rgba(0,0,0,0.82)',
+    visited:  '#3a3050',
+    unvisited:'#1a1828',
+    current:  '#c8a96e',
+    start:    '#2a4a2a',
+    end:      '#4a2020',
+    connector:'#4a4060',
+    border:   '#2a2a3a',
+    text:     '#c8a96e',
+  };
+
+  function renderMinimap(canvas) {
+    if (!currentRoom) return;
+    const ctx = canvas.getContext('2d');
+    const W   = canvas.width;
+    const H   = canvas.height;
+
+    // Find bounding box of all rooms in grid space
+    const roomList = Object.values(rooms);
+    let minGX = Infinity, maxGX = -Infinity;
+    let minGY = Infinity, maxGY = -Infinity;
+    for (const r of roomList) {
+      if (r.gx < minGX) minGX = r.gx;
+      if (r.gx > maxGX) maxGX = r.gx;
+      if (r.gy < minGY) minGY = r.gy;
+      if (r.gy > maxGY) maxGY = r.gy;
+    }
+
+    const gridW = maxGX - minGX + 1;
+    const gridH = maxGY - minGY + 1;
+    const mapW  = gridW * (MINI.roomW + MINI.gapX) - MINI.gapX + MINI.padding * 2;
+    const mapH  = gridH * (MINI.roomH + MINI.gapY) - MINI.gapY + MINI.padding * 2;
+
+    const originX = Math.floor((W - mapW) / 2);
+    const originY = Math.floor((H - mapH) / 2);
+
+    // Background panel
+    ctx.fillStyle = MINI.bg;
+    ctx.beginPath();
+    ctx.roundRect(originX, originY, mapW, mapH, 8);
+    ctx.fill();
+    ctx.strokeStyle = MINI.border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Helper: grid pos to screen pos (center of room box)
+    function roomScreenPos(gx, gy) {
+      return {
+        sx: originX + MINI.padding + (gx - minGX) * (MINI.roomW + MINI.gapX) + MINI.roomW / 2,
+        sy: originY + MINI.padding + (gy - minGY) * (MINI.roomH + MINI.gapY) + MINI.roomH / 2,
+      };
+    }
+
+    // Draw connectors first (behind rooms)
+    ctx.strokeStyle = MINI.connector;
+    ctx.lineWidth = 2;
+    for (const room of roomList) {
+      const { sx: ax, sy: ay } = roomScreenPos(room.gx, room.gy);
+      for (const dir of Object.keys(room.doors)) {
+        const connId  = room.doors[dir];
+        const conn    = rooms[connId];
+        if (!conn) continue;
+        const { sx: bx, sy: by } = roomScreenPos(conn.gx, conn.gy);
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.stroke();
+      }
+    }
+
+    // Draw room boxes
+    for (const room of roomList) {
+      const { sx, sy } = roomScreenPos(room.gx, room.gy);
+      const rx = sx - MINI.roomW / 2;
+      const ry = sy - MINI.roomH / 2;
+
+      if (room.id === currentRoom.id) {
+        ctx.fillStyle = MINI.current;
+      } else if (room.isStart) {
+        ctx.fillStyle = MINI.start;
+      } else if (room.isEnd) {
+        ctx.fillStyle = MINI.end;
+      } else if (room.visited) {
+        ctx.fillStyle = MINI.visited;
+      } else {
+        ctx.fillStyle = MINI.unvisited;
+      }
+
+      ctx.beginPath();
+      ctx.roundRect(rx, ry, MINI.roomW, MINI.roomH, 3);
+      ctx.fill();
+      ctx.strokeStyle = MINI.border;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Label
+    ctx.fillStyle = MINI.text;
+    ctx.font      = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('MAP  [M]', originX + mapW / 2, originY + mapH - 6);
+  }
+
   // ── Public API ───────────────────────────────────────────
   return {
     TILE,
@@ -544,6 +669,7 @@ const Dungeon = (() => {
     getCurrentTile,
     isWalkable,
     checkDoor,
+    renderMinimap,
     get currentRoom() { return currentRoom; },
     get rooms()       { return rooms; },
     get startRoomId() { return startRoomId; },
