@@ -16,7 +16,6 @@
   --color-text-dim:   #6e6a60;
 
   --hud-height: 48px;
-  --log-height: 120px;
 }
 
 *, *::before, *::after {
@@ -82,24 +81,3 @@ html, body {
   height: 100%;
   image-rendering: pixelated;
 }
-
-#log-panel {
-  flex: 0 0 var(--log-height);
-  background: var(--color-surface);
-  border-top: 1px solid var(--color-border);
-  padding: 10px 20px;
-  overflow-y: auto;
-}
-
-#message-log {
-  display: flex;
-  flex-direction: column-reverse;
-  gap: 4px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--color-text-dim);
-}
-
-#message-log .log-entry        { color: var(--color-text); }
-#message-log .log-entry.combat { color: var(--color-danger); }
-#message-log .log-entry.loot   { color: var(--color-accent); }
