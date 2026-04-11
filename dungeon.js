@@ -1,37 +1,43 @@
 // ============================================================
 //  DUNGEON CRAWLER — dungeon.js
-//  Procedural dungeon generation + axonometric tile renderer
+//  Procedural dungeon generation + top-down canvas renderer
+//  with locked camera viewport centered on player
 // ============================================================
 
 const Dungeon = (() => {
 
   // ── Tile types ──────────────────────────────────────────
   const TILE = {
-    VOID:  0,
-    FLOOR: 1,
-    WALL:  2,
-    DOOR:  3,
+    VOID:       0,
+    FLOOR:      1,
+    WALL:       2,
+    DOOR:       3,
     STAIR_DOWN: 4,
     STAIR_UP:   5,
   };
 
   // ── Generation config ────────────────────────────────────
   const DEFAULT_CONFIG = {
-    cols:       40,
-    rows:       30,
-    minRooms:   6,
-    maxRooms:   12,
-    minRoomW:   4,
-    maxRoomW:   10,
-    minRoomH:   4,
-    maxRoomH:   8,
+    cols:     80,
+    rows:     60,
+    minRooms: 10,
+    maxRooms: 20,
+    minRoomW: 5,
+    maxRoomW: 14,
+    minRoomH: 5,
+    maxRoomH: 10,
   };
 
+  // ── Camera / tile display config ─────────────────────────
+  const TILE_SIZE  = 32;  // px per tile
+  const VIEWPORT_W = 23;  // tiles visible horizontally (odd = centered)
+  const VIEWPORT_H = 17;  // tiles visible vertically
+
   // ── Internal state ───────────────────────────────────────
-  let grid   = [];   // 2D array of TILE values
-  let rooms  = [];   // { x, y, w, h }
-  let cols   = 0;
-  let rows   = 0;
+  let grid     = [];
+  let rooms    = [];
+  let cols     = 0;
+  let rows     = 0;
   let startPos = { x: 0, y: 0 };
   let stairPos = { x: 0, y: 0 };
 
@@ -80,7 +86,6 @@ const Dungeon = (() => {
 
   // ── Corridor carving ─────────────────────────────────────
   function carveCorridor(ax, ay, bx, by) {
-    // L-shaped corridor: horizontal then vertical (or vice versa)
     if (Math.random() < 0.5) {
       carveHorizontal(ax, bx, ay);
       carveVertical(ay, by, bx);
@@ -93,29 +98,26 @@ const Dungeon = (() => {
   function carveHorizontal(x1, x2, y) {
     const [start, end] = x1 < x2 ? [x1, x2] : [x2, x1];
     for (let x = start; x <= end; x++) {
-      if (getTile(x, y) === TILE.VOID || getTile(x, y) === TILE.WALL) {
+      if (getTile(x, y) === TILE.VOID || getTile(x, y) === TILE.WALL)
         setTile(x, y, TILE.FLOOR);
-      }
     }
   }
 
   function carveVertical(y1, y2, x) {
     const [start, end] = y1 < y2 ? [y1, y2] : [y2, y1];
     for (let y = start; y <= end; y++) {
-      if (getTile(x, y) === TILE.VOID || getTile(x, y) === TILE.WALL) {
+      if (getTile(x, y) === TILE.VOID || getTile(x, y) === TILE.WALL)
         setTile(x, y, TILE.FLOOR);
-      }
     }
   }
 
   // ── Wall pass ────────────────────────────────────────────
-  // Surround every floor tile that borders VOID with WALL
   function buildWalls() {
-    const directions = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         if (getTile(x, y) !== TILE.VOID) continue;
-        for (const [dx, dy] of directions) {
+        for (const [dx, dy] of dirs) {
           if (getTile(x + dx, y + dy) === TILE.FLOOR) {
             setTile(x, y, TILE.WALL);
             break;
@@ -131,8 +133,7 @@ const Dungeon = (() => {
     cols = cfg.cols;
     rows = cfg.rows;
 
-    // Init grid with VOID
-    grid = Array.from({ length: rows }, () => new Array(cols).fill(TILE.VOID));
+    grid  = Array.from({ length: rows }, () => new Array(cols).fill(TILE.VOID));
     rooms = [];
 
     const numRooms = rnd(cfg.minRooms, cfg.maxRooms);
@@ -159,11 +160,9 @@ const Dungeon = (() => {
 
     buildWalls();
 
-    // Place player start in center of first room
     const firstCenter = roomCenter(rooms[0]);
     startPos = { x: firstCenter.x, y: firstCenter.y };
 
-    // Place stair down in last room
     const lastCenter = roomCenter(rooms[rooms.length - 1]);
     stairPos = { x: lastCenter.x, y: lastCenter.y };
     setTile(stairPos.x, stairPos.y, TILE.STAIR_DOWN);
@@ -171,146 +170,161 @@ const Dungeon = (() => {
     return { grid, rooms, startPos, stairPos, cols, rows, TILE };
   }
 
-  // ── Axonometric renderer ─────────────────────────────────
-  //
-  //  Axonometric projection:
-  //    screen_x = (col - row) * (TILE_W / 2)
-  //    screen_y = (col + row) * (TILE_H / 2)
-  //
-  //  Each tile is drawn as a flat top face (parallelogram).
-  //  Walls additionally get a left and right side face for depth.
-
-  const TILE_W     = 48;
-  const TILE_H     = 24;
-  const WALL_DEPTH = 20;
-
-  // Color palette (mirrors CSS variables for canvas)
+  // ── Color palette ────────────────────────────────────────
   const COLOR = {
-    floorTop:   '#1e1e2e',
-    floorLeft:  '#16161f',
-    floorRight: '#1a1a28',
-    floorEdge:  '#2a2a40',
-
-    wallTop:    '#3a3050',
-    wallLeft:   '#2a2040',
-    wallRight:  '#221830',
-    wallEdge:   '#4a3a60',
-
-    stairTop:   '#2a3a2a',
-    stairLeft:  '#1a2a1a',
-    stairRight: '#1e2e1e',
-
-    voidFill:   '#0a0a0f',
-
-    playerFill: '#c8a96e',
-    playerRing: '#ffffff',
+    void:      '#0a0a0f',
+    floor:     '#2a2535',
+    floorAlt:  '#252030',
+    wall:      '#1a1520',
+    wallTop:   '#3d3550',
+    stairDown: '#2a4a2a',
+    stairUp:   '#4a2a2a',
+    stairIcon: '#c8a96e',
+    player:    '#c8a96e',
+    playerOut: '#0a0a0f',
+    gridLine:  '#1e1a28',
   };
 
-  function tileToScreen(col, row, offsetX, offsetY) {
-    return {
-      sx: offsetX + (col - row) * (TILE_W / 2),
-      sy: offsetY + (col + row) * (TILE_H / 2),
-    };
-  }
+  // ── Tile renderer ────────────────────────────────────────
+  function drawTile(ctx, tileType, px, py, col, row) {
+    const s = TILE_SIZE;
 
-  // Draw a diamond top face
-  function drawTop(ctx, sx, sy, fillColor, strokeColor) {
-    ctx.beginPath();
-    ctx.moveTo(sx,                sy - TILE_H / 2);  // top
-    ctx.lineTo(sx + TILE_W / 2,  sy);                // right
-    ctx.lineTo(sx,                sy + TILE_H / 2);  // bottom
-    ctx.lineTo(sx - TILE_W / 2,  sy);                // left
-    ctx.closePath();
-    ctx.fillStyle = fillColor;
-    ctx.fill();
-    if (strokeColor) {
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
+    switch (tileType) {
+      case TILE.VOID:
+        ctx.fillStyle = COLOR.void;
+        ctx.fillRect(px, py, s, s);
+        break;
+
+      case TILE.FLOOR:
+      case TILE.DOOR: {
+        const alt = (col + row) % 2 === 0;
+        ctx.fillStyle = alt ? COLOR.floor : COLOR.floorAlt;
+        ctx.fillRect(px, py, s, s);
+        ctx.strokeStyle = COLOR.gridLine;
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(px + 0.5, py + 0.5, s - 1, s - 1);
+        break;
+      }
+
+      case TILE.WALL: {
+        ctx.fillStyle = COLOR.wall;
+        ctx.fillRect(px, py, s, s);
+        // Top highlight edge
+        ctx.fillStyle = COLOR.wallTop;
+        ctx.fillRect(px, py, s, 4);
+        // Side shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(px, py + 4, 3, s - 4);
+        break;
+      }
+
+      case TILE.STAIR_DOWN: {
+        ctx.fillStyle = COLOR.stairDown;
+        ctx.fillRect(px, py, s, s);
+        ctx.strokeStyle = COLOR.stairIcon;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px + s * 0.25, py + s * 0.3);
+        ctx.lineTo(px + s * 0.5,  py + s * 0.55);
+        ctx.lineTo(px + s * 0.75, py + s * 0.3);
+        ctx.moveTo(px + s * 0.25, py + s * 0.5);
+        ctx.lineTo(px + s * 0.5,  py + s * 0.75);
+        ctx.lineTo(px + s * 0.75, py + s * 0.5);
+        ctx.stroke();
+        break;
+      }
+
+      case TILE.STAIR_UP: {
+        ctx.fillStyle = COLOR.stairUp;
+        ctx.fillRect(px, py, s, s);
+        ctx.strokeStyle = COLOR.stairIcon;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px + s * 0.25, py + s * 0.7);
+        ctx.lineTo(px + s * 0.5,  py + s * 0.45);
+        ctx.lineTo(px + s * 0.75, py + s * 0.7);
+        ctx.moveTo(px + s * 0.25, py + s * 0.5);
+        ctx.lineTo(px + s * 0.5,  py + s * 0.25);
+        ctx.lineTo(px + s * 0.75, py + s * 0.5);
+        ctx.stroke();
+        break;
+      }
     }
   }
 
-  // Draw left side face of a wall block
-  function drawWallLeft(ctx, sx, sy, fillColor) {
+  // ── Player renderer ──────────────────────────────────────
+  function drawPlayer(ctx, px, py) {
+    const s  = TILE_SIZE;
+    const cx = px + s / 2;
+    const cy = py + s / 2;
+    const r  = s * 0.28;
+
+    // Shadow
     ctx.beginPath();
-    ctx.moveTo(sx - TILE_W / 2, sy);                     // top-left of diamond
-    ctx.lineTo(sx,               sy + TILE_H / 2);        // bottom of diamond
-    ctx.lineTo(sx,               sy + TILE_H / 2 + WALL_DEPTH); // bottom-bottom
-    ctx.lineTo(sx - TILE_W / 2, sy + WALL_DEPTH);         // left bottom
-    ctx.closePath();
-    ctx.fillStyle = fillColor;
+    ctx.ellipse(cx, cy + r * 0.8, r * 0.7, r * 0.25, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fill();
-  }
 
-  // Draw right side face of a wall block
-  function drawWallRight(ctx, sx, sy, fillColor) {
+    // Body
     ctx.beginPath();
-    ctx.moveTo(sx + TILE_W / 2, sy);                     // top-right of diamond
-    ctx.lineTo(sx,               sy + TILE_H / 2);        // bottom of diamond
-    ctx.lineTo(sx,               sy + TILE_H / 2 + WALL_DEPTH);
-    ctx.lineTo(sx + TILE_W / 2, sy + WALL_DEPTH);
-    ctx.closePath();
-    ctx.fillStyle = fillColor;
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = COLOR.player;
     ctx.fill();
-  }
-
-  function drawTile(ctx, col, row, tileType, offsetX, offsetY) {
-    const { sx, sy } = tileToScreen(col, row, offsetX, offsetY);
-
-    if (tileType === TILE.VOID) return;
-
-    if (tileType === TILE.WALL) {
-      // Draw side faces first (painter's algorithm — back to front)
-      drawWallLeft(ctx,  sx, sy - WALL_DEPTH, COLOR.wallLeft);
-      drawWallRight(ctx, sx, sy - WALL_DEPTH, COLOR.wallRight);
-      drawTop(ctx, sx, sy - WALL_DEPTH, COLOR.wallTop, COLOR.wallEdge);
-    } else if (tileType === TILE.STAIR_DOWN || tileType === TILE.STAIR_UP) {
-      drawWallLeft(ctx,  sx, sy - WALL_DEPTH / 2, COLOR.stairLeft);
-      drawWallRight(ctx, sx, sy - WALL_DEPTH / 2, COLOR.stairRight);
-      drawTop(ctx, sx, sy - WALL_DEPTH / 2, COLOR.stairTop, COLOR.floorEdge);
-    } else {
-      drawTop(ctx, sx, sy, COLOR.floorTop, COLOR.floorEdge);
-    }
-  }
-
-  function drawPlayer(ctx, col, row, offsetX, offsetY) {
-    const { sx, sy } = tileToScreen(col, row, offsetX, offsetY);
-    // Draw a small diamond marker above the floor tile
-    const py = sy - 14;
-    ctx.beginPath();
-    ctx.arc(sx, py, 8, 0, Math.PI * 2);
-    ctx.fillStyle = COLOR.playerFill;
-    ctx.fill();
-    ctx.strokeStyle = COLOR.playerRing;
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = COLOR.playerOut;
+    ctx.lineWidth = 2;
     ctx.stroke();
+
+    // Center dot
+    ctx.beginPath();
+    ctx.arc(cx, cy + r * 0.4, r * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = COLOR.playerOut;
+    ctx.fill();
   }
 
+  // ── Main render ──────────────────────────────────────────
   function render(canvas, playerPos) {
     const ctx = canvas.getContext('2d');
-    const W = canvas.width;
-    const H = canvas.height;
+    const W   = canvas.width;
+    const H   = canvas.height;
 
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = COLOR.voidFill;
+    ctx.fillStyle = COLOR.void;
     ctx.fillRect(0, 0, W, H);
 
-    // Center the map on screen
-    const mapPixelW = (cols + rows) * (TILE_W / 2);
-    const mapPixelH = (cols + rows) * (TILE_H / 2);
-    const offsetX = W / 2;
-    const offsetY = (H - mapPixelH) / 2 + TILE_H;
+    const px = playerPos.x;
+    const py = playerPos.y;
 
-    // Painter's algorithm: render row by row, top to bottom
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        drawTile(ctx, col, row, getTile(col, row), offsetX, offsetY);
+    const halfW = Math.floor(VIEWPORT_W / 2);
+    const halfH = Math.floor(VIEWPORT_H / 2);
+
+    const screenCenterX = Math.floor(W / 2);
+    const screenCenterY = Math.floor(H / 2);
+
+    for (let row = py - halfH - 1; row <= py + halfH + 1; row++) {
+      for (let col = px - halfW - 1; col <= px + halfW + 1; col++) {
+        const tileType = getTile(col, row);
+        const screenX  = screenCenterX + (col - px) * TILE_SIZE - TILE_SIZE / 2;
+        const screenY  = screenCenterY + (row - py) * TILE_SIZE - TILE_SIZE / 2;
+        drawTile(ctx, tileType, screenX, screenY, col, row);
       }
     }
 
-    if (playerPos) {
-      drawPlayer(ctx, playerPos.x, playerPos.y, offsetX, offsetY);
-    }
+    // Player always drawn at screen center
+    drawPlayer(
+      ctx,
+      screenCenterX - TILE_SIZE / 2,
+      screenCenterY - TILE_SIZE / 2
+    );
+
+    // Vignette
+    const vignette = ctx.createRadialGradient(
+      W / 2, H / 2, H * 0.2,
+      W / 2, H / 2, H * 0.75
+    );
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.6)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
   }
 
   // ── Public API ───────────────────────────────────────────
@@ -320,12 +334,11 @@ const Dungeon = (() => {
     render,
     getTile,
     isWalkable,
-    tileToScreen,
-    get cols() { return cols; },
-    get rows() { return rows; },
+    get cols()     { return cols; },
+    get rows()     { return rows; },
     get startPos() { return { ...startPos }; },
     get stairPos() { return { ...stairPos }; },
-    get rooms() { return rooms.map(r => ({ ...r })); },
+    get rooms()    { return rooms.map(r => ({ ...r })); },
   };
 
 })();
