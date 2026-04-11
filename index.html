@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dungeon Crawler</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="game-wrapper">
+    <header id="hud">
+      <div id="hud-left">
+        <span id="player-name">Adventurer</span>
+        <span id="player-level">Level 1</span>
+      </div>
+      <div id="hud-center">
+        <span id="dungeon-depth">Depth: 1</span>
+      </div>
+      <div id="hud-right">
+        <span id="player-hp">HP: 100/100</span>
+      </div>
+    </header>
+
+    <main id="game-main">
+      <canvas id="dungeon-canvas"></canvas>
+    </main>
+
+    <footer id="log-panel">
+      <div id="message-log"></div>
+    </footer>
+  </div>
+
+  <script src="dungeon.js"></script>
+  <script src="player.js"></script>
+  <script src="combat.js"></script>
+  <script src="inventory.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

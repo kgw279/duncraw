@@ -1,0 +1,124 @@
+/* ============================================================
+   DUNGEON CRAWLER — style.css
+   Axonometric tile renderer styles + HUD layout
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=UnifrakturMaguntia&family=Share+Tech+Mono&display=swap');
+
+:root {
+  /* Core palette */
+  --color-bg:         #0a0a0f;
+  --color-surface:    #12121a;
+  --color-border:     #2a2a3a;
+  --color-accent:     #c8a96e;
+  --color-accent-dim: #7a6540;
+  --color-danger:     #c04040;
+  --color-text:       #d4cfc4;
+  --color-text-dim:   #6e6a60;
+
+  /* Tile colors — top face */
+  --tile-floor-top:   #1e1e2e;
+  --tile-wall-top:    #3a3050;
+  --tile-floor-left:  #16161f;
+  --tile-floor-right: #1a1a28;
+  --tile-wall-left:   #2a2040;
+  --tile-wall-right:  #221830;
+
+  /* Axonometric tile dimensions */
+  --tile-w: 48px;
+  --tile-h: 24px;
+  --tile-depth: 16px;
+
+  /* Layout */
+  --hud-height: 48px;
+  --log-height: 120px;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: 'Share Tech Mono', monospace;
+  overflow: hidden;
+}
+
+/* ── Layout ─────────────────────────────────────────────── */
+
+#game-wrapper {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+}
+
+#hud {
+  flex: 0 0 var(--hud-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  letter-spacing: 0.08em;
+  font-size: 13px;
+}
+
+#hud-left  { display: flex; gap: 16px; align-items: center; }
+#hud-right { display: flex; gap: 16px; align-items: center; }
+
+#player-name {
+  font-family: 'UnifrakturMaguntia', cursive;
+  font-size: 18px;
+  color: var(--color-accent);
+}
+
+#dungeon-depth {
+  color: var(--color-accent-dim);
+  letter-spacing: 0.12em;
+}
+
+#player-hp { color: var(--color-danger); }
+
+#game-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at center, #14141e 0%, #0a0a0f 100%);
+}
+
+#dungeon-canvas {
+  display: block;
+  /* Canvas size is set by JS */
+  image-rendering: pixelated;
+}
+
+#log-panel {
+  flex: 0 0 var(--log-height);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  padding: 10px 20px;
+  overflow-y: auto;
+}
+
+#message-log {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-dim);
+}
+
+#message-log .log-entry { color: var(--color-text); }
+#message-log .log-entry.combat { color: var(--color-danger); }
+#message-log .log-entry.loot   { color: var(--color-accent); }
