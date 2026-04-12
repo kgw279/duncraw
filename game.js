@@ -1,6 +1,6 @@
 // ============================================================
 //  DUNGEON CRAWLER — game.js
-//  Core loop — node-based dungeon, fade transitions, debug overlay
+//  Core loop — single grid dungeon, room-by-room transitions
 // ============================================================
 
 const Game = (() => {
@@ -10,7 +10,7 @@ const Game = (() => {
   // ── Transition ───────────────────────────────────────────
   const TRANSITION_FRAMES = 16;
   let transitioning  = false;
-  let transitionNext = null;   // { nodeId, fromExitId }
+  let transitionNext = null;   // { roomId, fromRoomId }
   let transAlpha     = 0;
   let transPhase     = 'out';
   let transFrame     = 0;
@@ -19,7 +19,7 @@ const Game = (() => {
   let minimapOpen = false;
   let debugOpen   = false;
 
-  // ── Player position (tile grid coords) ───────────────────
+  // ── Player position (map tile coords) ────────────────────
   let playerPos = { x: 0, y: 0 };
 
   // ── Canvas resize ────────────────────────────────────────
@@ -40,6 +40,7 @@ const Game = (() => {
 
   // ── Render ───────────────────────────────────────────────
   function render() {
+    Dungeon.setPlayerDot(playerPos.x, playerPos.y);
     Dungeon.render(canvas, playerPos);
 
     if (transitioning && transAlpha > 0) {
@@ -61,13 +62,15 @@ const Game = (() => {
     if (transPhase === 'out') {
       transAlpha = progress;
       if (transFrame >= TRANSITION_FRAMES) {
-        const { spawnPos } = Dungeon.enterNode(
-          transitionNext.nodeId,
-          transitionNext.fromExitId
+        const result = Dungeon.enterRoom(
+          transitionNext.roomId,
+          transitionNext.fromRoomId
         );
-        playerPos = { ...spawnPos };
-        Player.init(spawnPos.x, spawnPos.y);
-        updateHUD();
+        if (result) {
+          playerPos = { ...result.spawnPos };
+          Player.init(result.spawnPos.x, result.spawnPos.y);
+          updateHUD();
+        }
         transPhase = 'in';
         transFrame = 0;
       }
@@ -83,13 +86,13 @@ const Game = (() => {
     if (transitioning) requestAnimationFrame(stepTransition);
   }
 
-  function startTransition(nodeId, fromExitId) {
+  function startTransition(roomId, fromRoomId) {
     if (transitioning) return;
     transitioning  = true;
     transPhase     = 'out';
     transFrame     = 0;
     transAlpha     = 0;
-    transitionNext = { nodeId, fromExitId };
+    transitionNext = { roomId, fromRoomId };
     requestAnimationFrame(stepTransition);
   }
 
@@ -100,30 +103,26 @@ const Game = (() => {
     const nx = playerPos.x + dx;
     const ny = playerPos.y + dy;
 
-    // Check exit
-    const exit = Dungeon.checkExit(nx, ny);
-    if (exit && exit.connectedNodeId) {
-      if (exit.lock) {
-        // Locked — do nothing for now (key system TBD)
-        return;
-      }
-      startTransition(exit.connectedNodeId, exit.connectedExitId);
-      return;
-    }
-
-    // Check stair
+    // Stair check
     if (Dungeon.getCurrentTile(nx, ny) === Dungeon.TILE.STAIR_DOWN) {
       newFloor();
       return;
     }
 
-    // Normal move
-    if (Dungeon.isWalkable(nx, ny)) {
-      playerPos.x = nx;
-      playerPos.y = ny;
-      render();
-      updateHUD();
+    if (!Dungeon.isWalkable(nx, ny)) return;
+
+    playerPos.x = nx;
+    playerPos.y = ny;
+
+    // Check if we've walked into a different room
+    const newRoom = Dungeon.checkRoomTransition(nx, ny);
+    if (newRoom) {
+      startTransition(newRoom.id, Dungeon.currentRoom.id);
+      return;
     }
+
+    render();
+    updateHUD();
   }
 
   // ── Input ────────────────────────────────────────────────
@@ -139,7 +138,6 @@ const Game = (() => {
   };
 
   function handleKey(e) {
-    // Toggles
     if (e.key === 'm' || e.key === 'M') {
       minimapOpen = !minimapOpen;
       if (minimapOpen) debugOpen = false;
@@ -153,7 +151,6 @@ const Game = (() => {
       return;
     }
 
-    // Movement closes overlays
     const dir = MOVE_KEYS[e.key];
     if (!dir) return;
     e.preventDefault();
@@ -164,12 +161,8 @@ const Game = (() => {
 
   // ── New floor ────────────────────────────────────────────
   function newFloor() {
-    const data  = Dungeon.generate();
-    const start = data.currentNode;
-    playerPos   = {
-      x: Math.floor(start.cols / 2),
-      y: Math.floor(start.rows / 2),
-    };
+    const data = Dungeon.generate();
+    playerPos  = { x: data.startRoom.cx, y: data.startRoom.cy };
     Player.init(playerPos.x, playerPos.y);
     render();
     updateHUD();
@@ -181,12 +174,8 @@ const Game = (() => {
     window.addEventListener('resize', () => { resizeCanvas(); render(); });
     window.addEventListener('keydown', handleKey);
 
-    const data  = Dungeon.generate();
-    const start = data.currentNode;
-    playerPos   = {
-      x: Math.floor(start.cols / 2),
-      y: Math.floor(start.rows / 2),
-    };
+    const data = Dungeon.generate();
+    playerPos  = { x: data.startRoom.cx, y: data.startRoom.cy };
     Player.init(playerPos.x, playerPos.y);
 
     render();
