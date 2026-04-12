@@ -646,11 +646,13 @@ const Dungeon = (() => {
            t === TILE.STAIR_DOWN || t === TILE.STAIR_UP;
   }
 
-  // Return a connected room if the player steps into a corridor
-  // that leads to another room, or null
+  // Return a room to transition to, or null.
+  // Fires when player enters another room's bounds directly,
+  // OR when player steps out of current room onto a corridor tile.
   function checkRoomTransition(x, y) {
-    // If player is on a corridor or at a room edge, check if they've
-    // crossed into a different room's bounds
+    if (!currentRoom) return null;
+
+    // Direct room entry
     for (const room of rooms) {
       if (room.id === currentRoom.id) continue;
       if (x >= room.x && x < room.x + room.w &&
@@ -658,6 +660,28 @@ const Dungeon = (() => {
         return room;
       }
     }
+
+    // Left current room bounds onto a corridor
+    const inCurrentRoom = (
+      x >= currentRoom.x && x < currentRoom.x + currentRoom.w &&
+      y >= currentRoom.y && y < currentRoom.y + currentRoom.h
+    );
+
+    if (!inCurrentRoom && getTile(x, y) === TILE.CORRIDOR) {
+      const connected = connections.filter(
+        c => c.fromRoom === currentRoom.id || c.toRoom === currentRoom.id
+      );
+      let best = null, bestDist = Infinity;
+      for (const conn of connected) {
+        const otherId = conn.fromRoom === currentRoom.id ? conn.toRoom : conn.fromRoom;
+        const other   = rooms.find(r => r.id === otherId);
+        if (!other) continue;
+        const d = Math.abs(other.cx - x) + Math.abs(other.cy - y);
+        if (d < bestDist) { bestDist = d; best = other; }
+      }
+      return best;
+    }
+
     return null;
   }
 
