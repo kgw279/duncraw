@@ -533,12 +533,13 @@ const Dungeon = (() => {
 
     // Build debug logs
     for (const comp of compList) {
-      comp.debugLog.unshift(
+      const header = [
         `Type: ${comp.type} | Identity: ${comp.identity}`,
         comp.quality !== 'standard' ? `Quality: ${comp.quality}` : null,
         comp.repurposed ? `Repurposed as: ${comp.repurposedAs}` : null,
         `Size: ${comp.w}×${comp.h} tiles | Doors: ${comp.doors.length}`,
-      ).filter(Boolean);
+      ].filter(Boolean);
+      comp.debugLog.unshift(...header);
     }
   }
 
